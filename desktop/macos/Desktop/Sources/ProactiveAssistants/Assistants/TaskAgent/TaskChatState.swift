@@ -598,17 +598,6 @@ class TaskChatState: ObservableObject {
     errorMessage = nil
 
     let continuityKey = UUID().uuidString
-    let telemetryAttempt = ChatQueryTelemetryAttempt(
-      attemptId: continuityKey,
-      surface: ChatProvider.chatTelemetrySurface(
-        turnOwner: .taskChat(workstreamId),
-        isOnboarding: false,
-        systemPromptStyle: .main
-      ),
-      harness: Self.telemetryHarness(),
-      runtimeSurface: AgentSurfaceReference.workstream(workstreamId: workstreamId).surfaceKind,
-      inputLength: trimmedText.count
-    )
     let createdAt = Date()
     let userMessage = ChatMessage(
       id: UUID().uuidString,
@@ -649,10 +638,7 @@ class TaskChatState: ObservableObject {
         lease.authorizationSnapshot,
         writes
       )
-      guard isCurrent(lease) else {
-        telemetryAttempt.finish(stopReason: .superseded)
-        return
-      }
+      guard isCurrent(lease) else { return }
       guard receipt.operation == "record_exchange",
         receipt.turns.count == 2,
         Set(receipt.turns.map(\.turnId)) == Set(writes.map(\.turnId))
@@ -664,16 +650,25 @@ class TaskChatState: ObservableObject {
       if isCurrent(lease) {
         errorMessage = "Could not save this message. Try again."
         isSending = false
-        telemetryAttempt.fail(errorClass: .sessionSetup)
-      } else {
-        telemetryAttempt.finish(stopReason: .superseded)
       }
       return
     }
-    guard isCurrent(lease) else {
-      telemetryAttempt.finish(stopReason: .superseded)
-      return
-    }
+    guard isCurrent(lease) else { return }
+    // Telemetry starts only after atomic journal admission. Constructing
+    // earlier made admission failure emit `question_answered` with no
+    // matching `question_asked`. The admitted client attempt ID then joins
+    // success, failure, cancel, and supersession.
+    let telemetryAttempt = ChatQueryTelemetryAttempt(
+      attemptId: continuityKey,
+      surface: ChatProvider.chatTelemetrySurface(
+        turnOwner: .taskChat(workstreamId),
+        isOnboarding: false,
+        systemPromptStyle: .main
+      ),
+      harness: Self.telemetryHarness(),
+      runtimeSurface: AgentSurfaceReference.workstream(workstreamId: workstreamId).surfaceKind,
+      inputLength: trimmedText.count
+    )
     // Signal local send only after both canonical rows are accepted.
     localSendToken = LocalSendToken(generation: localSendToken.generation + 1)
     if draftText == text { draftText = "" }

@@ -112,6 +112,7 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
 
     XCTAssertNil(acceptedAttemptID)
     XCTAssertTrue(captured.filter { $0.0 == "question_asked" }.isEmpty)
+    XCTAssertTrue(captured.filter { $0.0 == "question_answered" }.isEmpty)
     XCTAssertTrue(state.messages.isEmpty)
     XCTAssertFalse(state.isSending)
     XCTAssertEqual(state.errorMessage, "Could not save this message. Try again.")
