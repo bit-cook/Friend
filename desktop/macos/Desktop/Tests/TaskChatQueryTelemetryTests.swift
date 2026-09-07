@@ -87,6 +87,7 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
 
   func testFailedJournalAdmissionDoesNotCountAsAsked() async {
     var acceptedAttemptID: String?
+    var journalUpdateStatuses: [KernelJournalTurnStatus?] = []
     let state = makeState(
       workstreamID: "workstream-taskchat-journal-fail-\(UUID().uuidString)",
       recordJournalExchangeOperation: { _, _, _, _ in
@@ -95,6 +96,9 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
       queryOperation: { _, _, _, _ in
         XCTFail("query must not run when journal admission fails")
         throw BridgeError.agentError("query must not run")
+      },
+      onJournalUpdate: { status in
+        journalUpdateStatuses.append(status)
       }
     )
 
@@ -113,6 +117,7 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
     XCTAssertNil(acceptedAttemptID)
     XCTAssertTrue(captured.filter { $0.0 == "question_asked" }.isEmpty)
     XCTAssertTrue(captured.filter { $0.0 == "question_answered" }.isEmpty)
+    XCTAssertTrue(journalUpdateStatuses.isEmpty)
     XCTAssertTrue(state.messages.isEmpty)
     XCTAssertFalse(state.isSending)
     XCTAssertEqual(state.errorMessage, "Could not save this message. Try again.")
@@ -121,6 +126,8 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
   func testQueryFailureAfterAdmissionJoinsAskedAndAnsweredByTheSameAttemptID() async throws {
     let workstreamID = "workstream-taskchat-query-fail-\(UUID().uuidString)"
     var acceptedAttemptID: String?
+    var journalUpdateStatuses: [KernelJournalTurnStatus?] = []
+    var terminalized = false
     let state = makeState(
       workstreamID: workstreamID,
       recordJournalExchangeOperation: { _, _, _, writes in
@@ -128,6 +135,12 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
       },
       queryOperation: { _, _, _, _ in
         throw BridgeError.timeout
+      },
+      onJournalUpdate: { status in
+        journalUpdateStatuses.append(status)
+      },
+      onTerminalize: {
+        terminalized = true
       }
     )
 
@@ -148,6 +161,8 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
     XCTAssertEqual(asked.first?.1["attempt_id"] as? String, clientAttemptID)
     XCTAssertEqual(answered.first?.1["attempt_id"] as? String, clientAttemptID)
     XCTAssertEqual(answered.first?.1["outcome"] as? String, "error")
+    XCTAssertEqual(journalUpdateStatuses.last ?? nil, .failed)
+    XCTAssertFalse(terminalized, "unbound query failure must not exact-terminalize the producing turn")
     XCTAssertFalse(state.isSending)
   }
 
@@ -189,7 +204,9 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
     workstreamID: String,
     recordJournalExchangeOperation: @escaping TaskChatState.RecordJournalExchangeOperation,
     queryOperation: TaskChatState.QueryOperation? = nil,
-    terminalizeJournalMessageOperation: TaskChatState.TerminalizeJournalMessageOperation? = nil
+    terminalizeJournalMessageOperation: TaskChatState.TerminalizeJournalMessageOperation? = nil,
+    onJournalUpdate: ((KernelJournalTurnStatus?) -> Void)? = nil,
+    onTerminalize: (() -> Void)? = nil
   ) -> TaskChatState {
     TaskChatState(
       taskId: "task-telemetry",
@@ -211,24 +228,35 @@ final class TaskChatQueryTelemetryTests: XCTestCase {
       recordJournalExchangeOperation: recordJournalExchangeOperation,
       queryOperation: queryOperation,
       updateJournalMessageOperation: { _, _, _, message, status in
-        try self.journalTurn(
+        onJournalUpdate?(status)
+        return try self.journalTurn(
           message: message,
           workstreamID: workstreamID,
           seq: 2,
           status: status ?? .streaming
         )
       },
-      terminalizeJournalMessageOperation: terminalizeJournalMessageOperation
-        ?? { _, _, _, message, producingRunId, producingAttemptId in
-          try self.journalTurn(
-            message: message,
-            workstreamID: workstreamID,
-            seq: 2,
-            status: .failed,
-            producingRunId: producingRunId,
-            producingAttemptId: producingAttemptId
-          )
+      terminalizeJournalMessageOperation: {
+        workstreamId, ownerID, snapshot, message, producingRunId, producingAttemptId in
+        onTerminalize?()
+        if let terminalizeJournalMessageOperation {
+          return try await terminalizeJournalMessageOperation(
+            workstreamId,
+            ownerID,
+            snapshot,
+            message,
+            producingRunId,
+            producingAttemptId)
         }
+        return try self.journalTurn(
+          message: message,
+          workstreamID: workstreamID,
+          seq: 2,
+          status: .failed,
+          producingRunId: producingRunId,
+          producingAttemptId: producingAttemptId
+        )
+      }
     )
   }
 
